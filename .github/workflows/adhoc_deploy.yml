@@ -1,0 +1,24 @@
+name: Terraform Adhoc Deploy
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  get-plan-id:
+    name: Generate Plan ID
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Plan ID
+        id: gen_plan_id
+        run: echo "plan_id=$(uuidgen)" >> $GITHUB_OUTPUT
+    outputs:
+      plan_id: ${{ steps.gen_plan_id.outputs.plan_id }}
+
+  ################################
+  # Deploy
+  ################################
+  plan-and-apply:
+    uses: ./.github/workflows/plan_and_apply.yml
+    secrets: inherit

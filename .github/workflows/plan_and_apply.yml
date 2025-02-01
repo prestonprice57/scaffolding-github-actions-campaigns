@@ -1,0 +1,225 @@
+name: Terraform Plan and Apply
+on:
+  workflow_call:
+
+jobs:
+  get-plan-id:
+    name: Generate Plan ID
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Plan ID
+        id: gen_plan_id
+        run: echo "plan_id=$(uuidgen)" >> $GITHUB_OUTPUT
+    outputs:
+      plan_id: ${{ steps.gen_plan_id.outputs.plan_id }}
+
+  plan:
+    name: Plan Sandbox
+    needs:
+      - get-plan-id
+    runs-on: ubuntu-latest
+    env:
+      ROOT_MODULE_PATH: ./
+
+    steps:
+      # Checkout the repository to the GitHub Actions runner
+      - name: Checkout
+        uses: actions/checkout@v3
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.6
+          terraform_wrapper: false
+
+      # Configures AWS Credentials for Terraform
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          role-to-assume: arn:aws:iam::619071311487:role/GithubActionsOIDCTerraformRunner
+          role-session-name: GithubActionsCIJobSession
+          aws-region: us-west-2
+      
+      - name: Test role assumption
+        run: |
+          aws sts get-caller-identity
+
+      - name: Terraform Init
+        working-directory: ${{ env.ROOT_MODULE_PATH }}
+        run: terraform init
+
+      # Run Terraform Plan to check what will be created
+      # To check if the plan has changes, we use -detailed-exitcode
+      # which will be 0 for no changes, 1 for errors, and 2 for changes
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.ROOT_MODULE_PATH }}
+        # have to use /bin/bash because GHA runs by default with `set -e` to end execution on any error.
+        # we want to capture the error instead.
+        shell: "/bin/bash {0}"
+        run: |
+          set +e
+          terraform plan -out tfplan -detailed-exitcode > plan_output.txt 2>&1
+          EXIT_CODE=$?
+
+          cat plan_output.txt
+
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+          if [[ $EXIT_CODE -eq 2 ]]; then
+            echo "plan_has_changes=true" >> $GITHUB_OUTPUT
+            exit 0
+          elif [[ $EXIT_CODE -eq 1 ]]; then
+            echo "plan_has_changes=true" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "plan_has_changes=false" >> $GITHUB_OUTPUT
+            exit $EXIT_CODE
+          fi
+        continue-on-error: true
+
+      - uses: GetTerminus/terraform-pr-commenter@v3
+        if: ${{ steps.plan.outputs.plan_has_changes == 'true' &&
+          github.event_name == 'pull_request' }}
+        env:
+          GITHUB_TOKEN: ${{ steps.get_workflow_token.outputs.token }}
+          TF_WORKSPACE: ${{ env.ROOT_MODULE_PATH }}
+        with:
+          commenter_type: plan
+          commenter_plan_path: ${{ env.ROOT_MODULE_PATH }}/plan_output.txt
+          commenter_exitcode: ${{ steps.plan.outputs.exit_code }}
+
+      # We want to publish a comment even when plan fails, but still fail
+      # the workflow, this does the latter
+      - name: Exit if Plan failed
+        run: |
+          EXIT_CODE=${{ steps.plan.outputs.exit_code }}
+          if [[ $EXIT_CODE -eq 2 ]]; then
+            exit 0
+          else
+            exit $EXIT_CODE
+          fi
+
+      - name: Save Artifact
+        id: save-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.get-plan-id.outputs.plan_id }}-tf-plan
+          path: ${{ env.ROOT_MODULE_PATH }}/tfplan
+
+    outputs:
+      plan_has_changes: ${{ steps.plan.outputs.plan_has_changes }}
+  
+  resourcely-ci:
+    needs:
+      - get-plan-id
+      - plan
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      ROOT_MODULE_PATH: ./
+
+    steps:
+      # Checkout the repository to the GitHub Actions runner
+      - name: Checkout
+        uses: actions/checkout@v3
+        
+      # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.6
+          terraform_wrapper: false
+
+      # Configures AWS Credentials for Terraform
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::619071311487:role/GithubActionsOIDCTerraformRunner
+          role-session-name: GithubActionsCIJobSession
+          aws-region: us-west-2
+      
+      - name: Terraform Init
+        run: terraform init
+        
+      - name: Download Terraform Plan Output
+        id: download-plan
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.get-plan-id.outputs.plan_id }}-tf-plan
+          path: ${{ env.ROOT_MODULE_PATH }}
+
+      - name: Convert the plan to JSON
+        id: planToJson
+        run: terraform show -json ./tfplan > tfplan.json
+
+      - name: Save JSON to a file
+        uses: fishcharlie/CmdToFile@v1.0.0
+        with:
+          data: |
+            {
+              "plans": [{
+                "plan_file": "tfplan.json",
+                "config_root_path": "."
+              }]
+            }
+          output: ./manifest.json
+
+      - name: Resourcely CI
+        uses: Resourcely-Inc/resourcely-action@v1
+        with:
+          resourcely_api_token: ${{ secrets.RESOURCELY_API_TOKEN }}
+          resourcely_api_host: "https://api.resourcely.io"
+          tf_plan_pattern: "tfplan.json"
+          tf_plan_directory: ${{ env.ROOT_MODULE_PATH }}
+
+  apply:
+    name: Apply Sandbox
+    needs:
+      - get-plan-id
+      - plan
+    if: |
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'push') &&
+      github.ref == 'refs/heads/main' &&
+      needs.plan.outputs.plan_has_changes == 'true'
+    runs-on: ubuntu-latest
+    environment: "sandbox"
+    env:
+      ROOT_MODULE_PATH: ./
+    steps:
+      # Checkout the repository to the GitHub Actions runner
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.6
+
+      # Configures AWS Credentials for Terraform
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::619071311487:role/GithubActionsOIDCTerraformRunner
+          role-session-name: GithubActionsCIJobSession
+          aws-region: us-west-2
+      
+      - name: Terraform Init
+        working-directory: ${{ env.ROOT_MODULE_PATH }}
+        run: terraform init
+
+      - name: Download Plan
+        id: download-plan
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.get-plan-id.outputs.plan_id }}-tf-plan
+          path: ${{ env.ROOT_MODULE_PATH }}
+
+      # Run Terraform Apply
+      - name: Terraform Apply
+        working-directory: ${{ env.ROOT_MODULE_PATH }}
+        run: terraform apply -auto-approve -input=false tfplan

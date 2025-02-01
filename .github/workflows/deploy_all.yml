@@ -1,0 +1,17 @@
+name: Deploy All Pipeline
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  ################################################
+  # Deploy in order from dev -> staging -> prod
+  ################################################
+
+  # Deploy App - us-west-2
+  plan-and-apply-app-dev-us-west-2:
+    uses: ./.github/workflows/plan_and_apply.yml
+    secrets: inherit
