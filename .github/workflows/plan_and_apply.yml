@@ -85,7 +85,7 @@ jobs:
         if: ${{ steps.plan.outputs.plan_has_changes == 'true' &&
           github.event_name == 'pull_request' }}
         env:
-          GITHUB_TOKEN: ${{ steps.get_workflow_token.outputs.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TF_WORKSPACE: ${{ env.ROOT_MODULE_PATH }}
         with:
           commenter_type: plan
