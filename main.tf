@@ -1,7 +1,7 @@
 # main.tf
 # foo
 resource "aws_s3_bucket" "campaigns-resource_ckaMshbmm94dxCHA" {
-  bucket = "campaigns-resource-test-bucket"
+  bucket = "resourcely-campaigns-test-bucketmxitnnhgaxcdhown"
 }
 
 resource "aws_s3_bucket_public_access_block" "campaigns-resource_ckaMshbmm94dxCHA" {
